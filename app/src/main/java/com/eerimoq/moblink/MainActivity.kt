@@ -162,8 +162,8 @@ class MainActivity : ComponentActivity() {
                     scanner =
                         Scanner(
                             getSystemService(Context.NSD_SERVICE) as NsdManager,
-                            { streamerName, streamerUrl ->
-                                runOnUiThread { handleStreamerFound(streamerName, streamerUrl) }
+                            { streamerName, streamerUrl, network ->
+                                runOnUiThread { handleStreamerFound(streamerName, streamerUrl, network) }
                             },
                             { streamerName -> runOnUiThread { handleStreamerLost(streamerName) } },
                         )
@@ -199,21 +199,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun handleStreamerFound(streamerName: String, streamerUrl: String) {
+    private fun handleStreamerFound(streamerName: String, streamerUrl: String, network: Network?) {
         logger.log("Found streamer $streamerName with URL $streamerUrl")
         val existingRelay = relays.find { relay -> relay.uiStreamerName == streamerName }
         if (existingRelay != null) {
-            if (existingRelay.uiStreamerUrl == streamerUrl) {
-                return
-            }
-            existingRelay.stop()
-            relays.remove(existingRelay)
+            existingRelay.addStreamerEndpoint(streamerUrl, network)
+            return
         }
         val database = settings!!.database
         val relay = Relay()
         relay.setup(
             database.relayId,
             streamerUrl,
+            network,
             database.automaticPassword!!,
             database.name,
             { status ->
@@ -264,6 +262,7 @@ class MainActivity : ComponentActivity() {
             relay.setup(
                 database.relayId,
                 relaySettings.streamerUrl,
+                null,
                 relaySettings.password,
                 database.name,
                 { status -> runOnUiThread { relay.uiStatus.value = status } },
