@@ -8,6 +8,8 @@ import androidx.compose.runtime.mutableStateOf
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
@@ -24,6 +26,7 @@ class Relay {
     private var destinationNetwork: Network? = null
     private var streamerSocket: DatagramSocket? = null
     private var destinationSocket: DatagramSocket? = null
+    private val webProxyConnections = mutableMapOf<String, Socket>()
     private var relayId = ""
     private var streamerUrl = ""
     private var password = ""
@@ -107,6 +110,8 @@ class Relay {
                 } else {
                     reconnectSoon("Destination network lost")
                 }
+            } else if (network == null) {
+                closeWebProxyConnections(notifyStreamer = true)
             }
             updateStatusInternal()
         }
@@ -190,6 +195,7 @@ class Relay {
         streamerSocket = null
         destinationSocket?.close()
         destinationSocket = null
+        closeWebProxyConnections(notifyStreamer = false)
     }
 
     private fun updateStatusInternal() {
@@ -239,6 +245,10 @@ class Relay {
                 handleMessageIdentified(message.identified)
             } else if (message.request != null) {
                 handleMessageRequest(message.request)
+            } else if (message.webProxyData != null) {
+                handleMessageWebProxyData(message.webProxyData)
+            } else if (message.webProxyClose != null) {
+                closeWebProxyConnection(message.webProxyClose.id, notifyStreamer = false)
             }
         } catch (e: Exception) {
             reconnectSoon("Message handling failed: $e")
@@ -249,8 +259,14 @@ class Relay {
         logger.log("$streamerUrl: Got hello: $hello")
         var concatenated = "$password${hello.authentication.salt}"
         concatenated = "${base64Encode(calcSha256(concatenated))}${hello.authentication.challenge}"
-        val identify = Identify(relayId, name, base64Encode(calcSha256(concatenated)))
-        send(MessageToStreamer(identify, null))
+        val identify =
+            Identify(
+                id = relayId,
+                name = name,
+                authentication = base64Encode(calcSha256(concatenated)),
+                capabilities = listOf(Capability.WEB_PROXY),
+            )
+        send(MessageToStreamer(identify = identify))
     }
 
     private fun handleMessageIdentified(identified: Identified) {
@@ -265,6 +281,8 @@ class Relay {
     private fun handleMessageRequest(request: com.eerimoq.moblink.Request) {
         if (request.data.startTunnel != null) {
             handleMessageStartTunnelRequest(request.id, request.data.startTunnel)
+        } else if (request.data.webProxyOpen != null) {
+            handleMessageWebProxyOpenRequest(request.id, request.data.webProxyOpen)
         } else if (request.data.status != null) {
             handleMessageStatus(request.id)
         }
@@ -292,21 +310,102 @@ class Relay {
             this,
             streamerUrl,
         )
-        val data = ResponseData(StartTunnelResponse(streamerSocket!!.localPort), null)
-        val response = Response(id, Result(Present(), null), data)
-        send(MessageToStreamer(null, response))
+        val data = ResponseData(startTunnel = StartTunnelResponse(streamerSocket!!.localPort))
+        val response = Response(id, Result(ok = Present()), data)
+        send(MessageToStreamer(response = response))
     }
 
     private fun handleMessageStatus(id: Int) {
         getStatus?.let {
             it { batteryPercentage, thermalState ->
                 handler?.post {
-                    val data = ResponseData(null, StatusResponse(batteryPercentage, thermalState))
-                    val response = Response(id, Result(Present(), null), data)
-                    send(MessageToStreamer(null, response))
+                    val data =
+                        ResponseData(status = StatusResponse(batteryPercentage, thermalState))
+                    val response = Response(id, Result(ok = Present()), data)
+                    send(MessageToStreamer(response = response))
                 }
             }
         }
+    }
+
+    private fun handleMessageWebProxyOpenRequest(id: Int, request: WebProxyOpenRequest) {
+        logger.log("$streamerUrl: Got web proxy open: $request")
+        val network = destinationNetwork
+        if (network == null) {
+            sendUnknownRequest(id)
+            return
+        }
+        closeWebProxyConnection(request.id, notifyStreamer = false)
+        val socket =
+            try {
+                network.socketFactory.createSocket()
+            } catch (error: Exception) {
+                logger.log("$streamerUrl: Failed to create web proxy socket: $error")
+                sendUnknownRequest(id)
+                return
+            }
+        try {
+            socket.tcpNoDelay = true
+            socket.keepAlive = true
+            socket.connect(InetSocketAddress(request.host, request.port), 10 * 1000)
+            webProxyConnections[request.id] = socket
+            startWebProxyReceiver(request.id, socket, this, streamerUrl)
+            val data = ResponseData(webProxyOpen = WebProxyOpenResponse(request.id))
+            val response = Response(id, Result(ok = Present()), data)
+            send(MessageToStreamer(response = response))
+        } catch (error: Exception) {
+            logger.log("$streamerUrl: Failed to open web proxy socket: $error")
+            socket.close()
+            sendUnknownRequest(id)
+        }
+    }
+
+    private fun handleMessageWebProxyData(webProxyData: WebProxyDataMessage) {
+        val socket = webProxyConnections[webProxyData.id] ?: return
+        try {
+            val data = Base64.decode(webProxyData.data, Base64.DEFAULT)
+            val outputStream = socket.getOutputStream()
+            outputStream.write(data)
+            outputStream.flush()
+        } catch (error: Exception) {
+            logger.log("$streamerUrl: Failed to write web proxy data: $error")
+            closeWebProxyConnection(webProxyData.id, notifyStreamer = true)
+        }
+    }
+
+    fun webProxySocketData(id: String, socket: Socket, data: String) {
+        handler?.post {
+            if (webProxyConnections[id] === socket) {
+                send(MessageToStreamer(webProxyData = WebProxyDataMessage(id, data)))
+            }
+        }
+    }
+
+    fun webProxySocketClosed(id: String, socket: Socket) {
+        handler?.post {
+            if (webProxyConnections[id] === socket) {
+                closeWebProxyConnection(id, notifyStreamer = true)
+            }
+        }
+    }
+
+    private fun closeWebProxyConnection(id: String, notifyStreamer: Boolean) {
+        val socket = webProxyConnections.remove(id) ?: return
+        socket.close()
+        if (notifyStreamer) {
+            send(MessageToStreamer(webProxyClose = WebProxyConnectionMessage(id)))
+        }
+    }
+
+    private fun closeWebProxyConnections(notifyStreamer: Boolean) {
+        for (id in webProxyConnections.keys.toList()) {
+            closeWebProxyConnection(id, notifyStreamer)
+        }
+    }
+
+    private fun sendUnknownRequest(id: Int) {
+        val response = Response(id, Result(unknownRequest = Present()), null)
+        send(MessageToStreamer(response = response))
     }
 
     private fun send(message: MessageToStreamer) {
@@ -373,6 +472,26 @@ private fun startDestinationReceiver(
             logger.log("$streamerUrl: Destination receiver error $error")
             relay?.destinationSocketError(destinationSocket)
         }
+    }
+}
+
+private fun startWebProxyReceiver(id: String, socket: Socket, relay: Relay, streamerUrl: String) {
+    thread {
+        val buffer = ByteArray(16 * 1024)
+        try {
+            val inputStream = socket.getInputStream()
+            while (true) {
+                val size = inputStream.read(buffer)
+                if (size <= 0) {
+                    break
+                }
+                val data = Base64.encodeToString(buffer, 0, size, Base64.NO_WRAP)
+                relay.webProxySocketData(id, socket, data)
+            }
+        } catch (error: Exception) {
+            logger.log("$streamerUrl: Web proxy receiver error $error")
+        }
+        relay.webProxySocketClosed(id, socket)
     }
 }
 
