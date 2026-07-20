@@ -19,8 +19,9 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 object UUIDv7 {
-    private val numberGenerator: ThreadLocal<SecureRandom> =
-        ThreadLocal.withInitial { SecureRandom() }
+    private val numberGenerator: ThreadLocal<SecureRandom> = ThreadLocal.withInitial {
+        SecureRandom()
+    }
 
     // Shared monotonic states
     private val lastMillis = AtomicLong(Long.MIN_VALUE)

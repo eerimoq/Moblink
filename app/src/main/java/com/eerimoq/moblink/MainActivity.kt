@@ -240,8 +240,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateAutomaticStatus() {
-        val connectedCount =
-            relays.count { relay -> relay.uiStatus.value == "Connected to streamer" }
+        val connectedCount = relays.count { relay ->
+            relay.uiStatus.value == "Connected to streamer"
+        }
         val totalCount = relays.count()
         automaticStatus.value =
             if (!automaticStarted) {
