@@ -1,8 +1,6 @@
 package com.eerimoq.moblink
 
 import android.Manifest
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
@@ -15,6 +13,7 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
+import androidx.core.content.FileProvider
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -312,19 +311,18 @@ class MainActivity : ComponentActivity() {
         return relays.any { it.uiStarted }
     }
 
-    private fun copyLogToClipboard() {
-        val clipboard: ClipboardManager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        while (true) {
-            try {
-                val clip = ClipData.newPlainText("log.txt", logger.formatLog())
-                clipboard.setPrimaryClip(clip)
-                break
-            } catch (e: android.os.TransactionTooLargeException) {
-                logger.makeSmaller()
-            } catch (e: java.lang.RuntimeException) {
-                break
-            }
+    private fun shareLog() {
+        val file = cacheDir.resolve("moblink-log.txt")
+        file.writeText(logger.formatLog())
+        val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+        val shareIntent = android.content.Intent().apply {
+            action = android.content.Intent.ACTION_SEND
+            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+            type = "text/plain"
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
+        val chooser = android.content.Intent.createChooser(shareIntent, "Share Log")
+        startActivity(chooser)
     }
 
     private fun cellularNetworkUpdated() {
@@ -512,7 +510,7 @@ class MainActivity : ComponentActivity() {
             } else {
                 Automatic()
             }
-            CopyLog()
+            ShareLog()
             Text("Version $version")
             Spacer(modifier = Modifier.fillMaxHeight())
         }
@@ -687,9 +685,9 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    fun CopyLog() {
-        Button(modifier = Modifier.padding(bottom = 10.dp), onClick = { copyLogToClipboard() }) {
-            Text("Copy log")
+    fun ShareLog() {
+        Button(modifier = Modifier.padding(bottom = 10.dp), onClick = { shareLog() }) {
+            Text("Share log")
         }
     }
 }

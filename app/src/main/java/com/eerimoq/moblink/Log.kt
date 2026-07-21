@@ -9,7 +9,7 @@ class Logger {
     fun log(message: String) {
         Log.i("Moblink", message)
         synchronized(this) {
-            if (log.size > 1000) {
+            if (log.size > 100000) {
                 log.removeFirst()
             }
             val timestamp = LocalDateTime.now()
@@ -20,15 +20,6 @@ class Logger {
     fun formatLog(): String {
         synchronized(this) {
             return log.joinToString("\n")
-        }
-    }
-
-    fun makeSmaller() {
-        synchronized(this) {
-            val newSize = (log.size - 100).coerceAtLeast(0)
-            while (log.size > newSize) {
-                log.removeFirst()
-            }
         }
     }
 }
