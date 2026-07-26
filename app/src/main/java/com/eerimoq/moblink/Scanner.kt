@@ -1,5 +1,6 @@
 package com.eerimoq.moblink
 
+import android.net.Network
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import java.net.Inet4Address
@@ -10,7 +11,7 @@ private class Resolve(var cancelled: Boolean = false)
 
 class Scanner(
     private val nsdManager: NsdManager,
-    private val onFound: (String, String) -> Unit,
+    private val onFound: (String, String, Network?) -> Unit,
     private val onLost: (String) -> Unit,
 ) {
     private var listener: NsdManager.DiscoveryListener? = null
@@ -75,7 +76,7 @@ class Scanner(
                         "[${service.host.hostAddress}]"
                     }
                 val url = "ws://${address}:${service.port}"
-                onFound(service.serviceName, url)
+                onFound(service.serviceName, url, service.network)
             }
         }
     }

@@ -18,14 +18,17 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString.Companion.encodeUtf8
 
+private data class StreamerEndpoint(val url: String, val network: Network?)
+
 class Relay {
-    private val okHttpClient = OkHttpClient.Builder().pingInterval(5, TimeUnit.SECONDS).build()
+    private val baseOkHttpClient = OkHttpClient.Builder().pingInterval(5, TimeUnit.SECONDS).build()
     private var webSocket: WebSocket? = null
     private var destinationNetwork: Network? = null
     private var streamerSocket: DatagramSocket? = null
     private var destinationSocket: DatagramSocket? = null
     private var relayId = ""
-    private var streamerUrl = ""
+    private var currentStreamerUrl = ""
+    private var currentEndpointIndex = 0
     private var password = ""
     private var name = ""
     private val handlerThread = HandlerThread("Something")
@@ -41,10 +44,12 @@ class Relay {
     var uiStarted = false
     var uiStreamerName = ""
     var uiStreamerUrl = ""
+    private val streamerEndpoints = mutableListOf<StreamerEndpoint>()
 
     fun setup(
         relayId: String,
         streamerUrl: String,
+        streamerNetwork: Network?,
         password: String,
         name: String,
         onStatusUpdated: (String) -> Unit,
@@ -57,7 +62,10 @@ class Relay {
         handler = Handler(handlerThread.looper)
         handler?.post {
             this.relayId = relayId
-            this.streamerUrl = streamerUrl
+            this.currentStreamerUrl = streamerUrl
+            this.currentEndpointIndex = 0
+            this.streamerEndpoints.clear()
+            this.streamerEndpoints.add(StreamerEndpoint(streamerUrl, streamerNetwork))
             this.password = password
             this.name = name
             updateStatusInternal()
@@ -65,7 +73,7 @@ class Relay {
     }
 
     fun start() {
-        logger.log("$streamerUrl: Start")
+        logger.log("$currentStreamerUrl: Start")
         uiStarted = true
         uiButtonText.value = "Stop"
         handler?.post {
@@ -77,7 +85,7 @@ class Relay {
     }
 
     fun stop() {
-        logger.log("$streamerUrl: Stop")
+        logger.log("$currentStreamerUrl: Stop")
         uiStarted = false
         uiButtonText.value = "Start"
         handler?.post {
@@ -91,10 +99,23 @@ class Relay {
     fun updateSettings(relayId: String, streamerUrl: String, password: String, name: String) {
         handler?.post {
             this.relayId = relayId
-            this.streamerUrl = streamerUrl
+            this.currentStreamerUrl = streamerUrl
+            this.currentEndpointIndex = 0
+            this.streamerEndpoints.clear()
+            this.streamerEndpoints.add(StreamerEndpoint(streamerUrl, null))
             this.password = password
             this.name = name
             updateStatusInternal()
+        }
+    }
+
+    fun addStreamerEndpoint(streamerUrl: String, network: Network?) {
+        handler?.post {
+            val existingEndpoint = streamerEndpoints.find { endpoint -> endpoint.url == streamerUrl }
+            if (existingEndpoint == null) {
+                streamerEndpoints.add(StreamerEndpoint(streamerUrl, network))
+                logger.log("$currentStreamerUrl: Added streamer endpoint $streamerUrl")
+            }
         }
     }
 
@@ -130,19 +151,24 @@ class Relay {
 
     private fun startInternal() {
         stopInternal()
-        logger.log("$streamerUrl: Start internal when started: $started")
-        if (!started) {
+        logger.log("$currentStreamerUrl: Start internal when started: $started")
+        if (!started || streamerEndpoints.isEmpty()) {
             return
         }
+        if (currentEndpointIndex >= streamerEndpoints.size) {
+            currentEndpointIndex = 0
+        }
+        val endpoint = streamerEndpoints[currentEndpointIndex]
+        currentStreamerUrl = endpoint.url
         val request =
             try {
-                Request.Builder().url(streamerUrl).build()
+                Request.Builder().url(endpoint.url).build()
             } catch (e: Exception) {
-                logger.log("$streamerUrl: Failed to build URL: $e")
+                logger.log("$currentStreamerUrl: Failed to build URL: $e")
                 return
             }
         webSocket =
-            okHttpClient.newWebSocket(
+            buildWebSocketClient(endpoint.network).newWebSocket(
                 request,
                 object : WebSocketListener() {
                     override fun onMessage(webSocket: WebSocket, text: String) {
@@ -158,6 +184,7 @@ class Relay {
                         super.onClosed(webSocket, code, reason)
                         handler?.post {
                             if (webSocket === getWebsocket()) {
+                                advanceStreamerEndpoint()
                                 reconnectSoon("Websocket closed $reason (code $code)")
                             }
                         }
@@ -171,6 +198,7 @@ class Relay {
                         super.onFailure(webSocket, t, response)
                         handler?.post {
                             if (webSocket === getWebsocket()) {
+                                advanceStreamerEndpoint()
                                 reconnectSoon("Websocket failure $t")
                             }
                         }
@@ -180,7 +208,7 @@ class Relay {
     }
 
     private fun stopInternal() {
-        logger.log("$streamerUrl: Stop internal")
+        logger.log("$currentStreamerUrl: Stop internal")
         webSocket?.cancel()
         webSocket = null
         connected = false
@@ -194,7 +222,7 @@ class Relay {
 
     private fun updateStatusInternal() {
         val status =
-            if (streamerUrl.isEmpty()) {
+            if (currentStreamerUrl.isEmpty()) {
                 "Streamer URL empty"
             } else if (password.isEmpty()) {
                 "Password empty"
@@ -209,12 +237,12 @@ class Relay {
             } else {
                 "Disconnected from streamer"
             }
-        logger.log("$streamerUrl: Status: $status")
+        logger.log("$currentStreamerUrl: Status: $status")
         onStatusUpdated?.let { it(status) }
     }
 
     private fun reconnectSoon(reason: String) {
-        logger.log("$streamerUrl: Reconnect soon with reason: $reason")
+        logger.log("$currentStreamerUrl: Reconnect soon with reason: $reason")
         stopInternal()
         if (reconnectSoonRunnable != null) {
             handler?.removeCallbacks(reconnectSoonRunnable!!)
@@ -246,7 +274,7 @@ class Relay {
     }
 
     private fun handleMessageHello(hello: Hello) {
-        logger.log("$streamerUrl: Got hello: $hello")
+        logger.log("$currentStreamerUrl: Got hello: $hello")
         var concatenated = "$password${hello.authentication.salt}"
         concatenated = "${base64Encode(calcSha256(concatenated))}${hello.authentication.challenge}"
         val identify = Identify(relayId, name, base64Encode(calcSha256(concatenated)))
@@ -270,8 +298,24 @@ class Relay {
         }
     }
 
+    private fun buildWebSocketClient(network: Network?): OkHttpClient {
+        return if (network != null) {
+            baseOkHttpClient.newBuilder().socketFactory(network.socketFactory).build()
+        } else {
+            baseOkHttpClient
+        }
+    }
+
+    private fun advanceStreamerEndpoint() {
+        if (streamerEndpoints.size > 1) {
+            currentEndpointIndex = (currentEndpointIndex + 1) % streamerEndpoints.size
+            currentStreamerUrl = streamerEndpoints[currentEndpointIndex].url
+            logger.log("$currentStreamerUrl: Advancing to next streamer endpoint")
+        }
+    }
+
     private fun handleMessageStartTunnelRequest(id: Int, startTunnel: StartTunnelRequest) {
-        logger.log("$streamerUrl: Got start tunnel: $startTunnel")
+        logger.log("$currentStreamerUrl: Got start tunnel: $startTunnel")
         streamerSocket?.close()
         streamerSocket = null
         destinationSocket?.close()
@@ -290,7 +334,7 @@ class Relay {
             InetAddress.getByName(startTunnel.address),
             startTunnel.port,
             this,
-            streamerUrl,
+            currentStreamerUrl,
         )
         val data = ResponseData(StartTunnelResponse(streamerSocket!!.localPort), null)
         val response = Response(id, Result(Present(), null), data)
