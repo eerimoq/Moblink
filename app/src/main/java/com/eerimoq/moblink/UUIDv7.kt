@@ -2,18 +2,16 @@
  *     DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
  *            Version 2, December 2004
  *
- *  Copyright (C) 2024 0xShamil
+ * Copyright (C) 2024 0xShamil
  *
- *  Everyone is permitted to copy and distribute verbatim or modified
- *  copies of this license document, and changing it is allowed as long
- *  as the name is changed.
+ * Everyone is permitted to copy and distribute verbatim or modified copies of this license
+ * document, and changing it is allowed as long as the name is changed.
  *
  *             DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
  *    TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
  *
- *   0. You just DO WHAT THE FUCK YOU WANT TO.
+ * 0. You just DO WHAT THE FUCK YOU WANT TO.
  */
-
 package com.eerimoq.moblink
 
 import java.security.SecureRandom
@@ -22,15 +20,15 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 object UUIDv7 {
-    private val numberGenerator: ThreadLocal<SecureRandom> = ThreadLocal.withInitial { SecureRandom() }
+    private val numberGenerator: ThreadLocal<SecureRandom> = ThreadLocal.withInitial {
+        SecureRandom()
+    }
 
     // Shared monotonic states
     private val lastMillis = AtomicLong(Long.MIN_VALUE)
     private val lastSeq12 = AtomicInteger(-1)
 
-    /**
-     * @return A UUID object representing a UUIDv7 value.
-     */
+    /** @return A UUID object representing a UUIDv7 value. */
     fun randomUUID(): UUID {
         val bytes = randomBytesMonotonic()
         val msb = bytes.toLongBE(0)
@@ -39,17 +37,15 @@ object UUIDv7 {
     }
 
     /**
-     * Generates a 16-byte array.
-     * The first 6 bytes contain the current timestamp in milliseconds.
+     * Generates a 16-byte array. The first 6 bytes contain the current timestamp in milliseconds.
      * The next bytes are random, with specific bits set for version and variant.
      *
      * Layout:
-     *  - [0..5]   : 48-bit Unix epoch milliseconds (timestamp)
-     *  - [6]      : high nibble = version 7, low nibble = rand_a[11:8]
-     *  - [7]      : rand_a[7:0] (12-bit monotonic sequence, wraps mod 4096)
-     *  - [8]      : IETF variant in high 2 bits, lower 6 bits random
-     *  - [9..15]  : remaining 62 bits of randomness across [8..15], except variant bits
-     *
+     * - [0..5] : 48-bit Unix epoch milliseconds (timestamp)
+     * - [6] : high nibble = version 7, low nibble = rand_a[11:8]
+     * - [7] : rand_a[7:0] (12-bit monotonic sequence, wraps mod 4096)
+     * - [8] : IETF variant in high 2 bits, lower 6 bits random
+     * - [9..15] : remaining 62 bits of randomness across [8..15], except variant bits
      *
      * @return A ByteArray of 16 bytes representing the UUIDv7.
      */
@@ -85,13 +81,13 @@ object UUIDv7 {
     // Big-endian 8-byte to long
     private fun ByteArray.toLongBE(offset: Int = 0): Long {
         return (this[offset].toLong() and 0xFF shl 56) or
-                (this[offset + 1].toLong() and 0xFF shl 48) or
-                (this[offset + 2].toLong() and 0xFF shl 40) or
-                (this[offset + 3].toLong() and 0xFF shl 32) or
-                (this[offset + 4].toLong() and 0xFF shl 24) or
-                (this[offset + 5].toLong() and 0xFF shl 16) or
-                (this[offset + 6].toLong() and 0xFF shl 8) or
-                (this[offset + 7].toLong() and 0xFF)
+            (this[offset + 1].toLong() and 0xFF shl 48) or
+            (this[offset + 2].toLong() and 0xFF shl 40) or
+            (this[offset + 3].toLong() and 0xFF shl 32) or
+            (this[offset + 4].toLong() and 0xFF shl 24) or
+            (this[offset + 5].toLong() and 0xFF shl 16) or
+            (this[offset + 6].toLong() and 0xFF shl 8) or
+            (this[offset + 7].toLong() and 0xFF)
     }
 
     /**

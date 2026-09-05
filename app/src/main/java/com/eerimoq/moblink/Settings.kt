@@ -1,7 +1,6 @@
 package com.eerimoq.moblink
 
 import android.content.SharedPreferences
-import java.util.UUID
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
