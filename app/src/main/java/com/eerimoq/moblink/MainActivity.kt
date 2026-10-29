@@ -109,7 +109,7 @@ class MainActivity : ComponentActivity() {
         modeChanged()
         try {
             val packageInfo = packageManager.getPackageInfo(packageName, 0)
-            version = packageInfo.versionName
+            version = packageInfo.versionName ?: "?"
         } catch (_: Exception) {}
         requestNetwork(NetworkCapabilities.TRANSPORT_CELLULAR, createCellularNetworkRequest())
         requestNetwork(NetworkCapabilities.TRANSPORT_WIFI, createWiFiNetworkRequest())
