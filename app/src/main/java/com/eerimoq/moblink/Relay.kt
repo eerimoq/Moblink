@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.Proxy
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
@@ -22,6 +23,7 @@ class Relay {
     private val okHttpClient = OkHttpClient.Builder().pingInterval(5, TimeUnit.SECONDS).build()
     private var webSocket: WebSocket? = null
     private var destinationNetwork: Network? = null
+    private var wifiNetwork: Network? = null
     private var streamerSocket: DatagramSocket? = null
     private var destinationSocket: DatagramSocket? = null
     private var relayId = ""
@@ -98,8 +100,24 @@ class Relay {
         }
     }
 
+    fun setWiFiNetwork(network: Network?) {
+        handler?.post {
+            if (wifiNetwork == network) {
+                return@post
+            }
+            wifiNetwork = network
+            if (started) {
+                startInternal()
+            }
+            updateStatusInternal()
+        }
+    }
+
     fun setDestinationNetwork(network: Network?) {
         handler?.post {
+            if (destinationNetwork == network) {
+                return@post
+            }
             destinationNetwork = network
             if (destinationSocket != null) {
                 if (network != null) {
@@ -131,9 +149,10 @@ class Relay {
     private fun startInternal() {
         stopInternal()
         logger.log("$streamerUrl: Start internal when started: $started")
-        if (!started) {
+        if (!started || wifiNetwork == null) {
             return
         }
+        val wifi = wifiNetwork!!
         val request =
             try {
                 Request.Builder().url(streamerUrl).build()
@@ -141,8 +160,15 @@ class Relay {
                 logger.log("$streamerUrl: Failed to build URL: $e")
                 return
             }
+        val wifiClient =
+            okHttpClient
+                .newBuilder()
+                .socketFactory(wifi.socketFactory)
+                .dns { host -> wifi.getAllByName(host).toList() }
+                .proxy(Proxy.NO_PROXY)
+                .build()
         webSocket =
-            okHttpClient.newWebSocket(
+            wifiClient.newWebSocket(
                 request,
                 object : WebSocketListener() {
                     override fun onMessage(webSocket: WebSocket, text: String) {
@@ -198,6 +224,8 @@ class Relay {
                 "Streamer URL empty"
             } else if (password.isEmpty()) {
                 "Password empty"
+            } else if (wifiNetwork == null) {
+                "Waiting for local Wi-Fi"
             } else if (destinationNetwork == null) {
                 "Waiting for cellular"
             } else if (connected) {
@@ -276,18 +304,19 @@ class Relay {
         streamerSocket = null
         destinationSocket?.close()
         destinationSocket = null
-        if (destinationNetwork == null) {
+        if (destinationNetwork == null || wifiNetwork == null) {
             reconnectSoon("Start tunnel without destination network")
             return
         }
         streamerSocket = DatagramSocket()
+        wifiNetwork!!.bindSocket(streamerSocket)
         destinationSocket = DatagramSocket()
         destinationSocket?.soTimeout = 30 * 1000
         destinationNetwork?.bindSocket(destinationSocket)
         startStreamerReceiver(
             streamerSocket!!,
             destinationSocket!!,
-            InetAddress.getByName(startTunnel.address),
+            destinationNetwork!!.getAllByName(startTunnel.address).first(),
             startTunnel.port,
             this,
             streamerUrl,

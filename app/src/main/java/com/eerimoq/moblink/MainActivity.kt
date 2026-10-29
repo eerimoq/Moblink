@@ -81,6 +81,8 @@ class MainActivity : ComponentActivity() {
     private var automaticButtonText = mutableStateOf("Start")
     private var automaticStatus = mutableStateOf("Not started")
     private var cellularNetwork: Network? = null
+    private var wifiNetwork: Network? = null
+    private val networkCallbacks: MutableList<NetworkCallback> = mutableListOf()
     private var ethernetNetwork: Network? = null
     private var showingNotificationsNotAllowedDialog = mutableStateOf(false)
     private var requestPermissionCompletion: ((isGranted: Boolean) -> Unit)? = null
@@ -98,6 +100,11 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        val manager = getSystemService(ConnectivityManager::class.java)
+        for (callback in networkCallbacks) {
+            manager.unregisterNetworkCallback(callback)
+        }
+        networkCallbacks.clear()
         stopAutomatic()
         teardownManual()
         super.onDestroy()
@@ -231,6 +238,7 @@ class MainActivity : ComponentActivity() {
         relay.uiStreamerUrl = streamerUrl
         relay.start()
         relay.setDestinationNetwork(cellularNetwork)
+        relay.setWiFiNetwork(wifiNetwork)
         relays.add(relay)
         updateAutomaticStatus()
     }
@@ -247,6 +255,8 @@ class MainActivity : ComponentActivity() {
         automaticStatus.value =
             if (!automaticStarted) {
                 "Not started"
+            } else if (wifiNetwork == null) {
+                "Waiting for local Wi-Fi"
             } else if (cellularNetwork == null) {
                 "Waiting for cellular"
             } else if (totalCount > 0) {
@@ -271,6 +281,7 @@ class MainActivity : ComponentActivity() {
                 { callback -> runOnUiThread { getStatus(callback) } },
             )
             relay.setDestinationNetwork(cellularNetwork)
+            relay.setWiFiNetwork(wifiNetwork)
             relays.add(relay)
         }
     }
@@ -330,6 +341,7 @@ class MainActivity : ComponentActivity() {
     private fun cellularNetworkUpdated() {
         for (relay in relays) {
             relay.setDestinationNetwork(cellularNetwork)
+            relay.setWiFiNetwork(wifiNetwork)
         }
     }
 
@@ -395,12 +407,17 @@ class MainActivity : ComponentActivity() {
     private fun requestNetwork(transportType: Int, networkCallback: NetworkCallback) {
         val networkRequest =
             NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .apply {
+                    if (transportType != NetworkCapabilities.TRANSPORT_WIFI) {
+                        addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    }
+                }
                 .addTransportType(transportType)
                 .build()
         val connectivityManager =
             getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         connectivityManager.requestNetwork(networkRequest, networkCallback)
+        networkCallbacks.add(networkCallback)
     }
 
     private fun createCellularNetworkRequest(): NetworkCallback {
@@ -408,6 +425,9 @@ class MainActivity : ComponentActivity() {
             override fun onAvailable(network: Network) {
                 super.onAvailable(network)
                 runOnUiThread {
+                    if (isDestroyed) {
+                        return@runOnUiThread
+                    }
                     logger.log("Cellular network available")
                     cellularNetwork = network
                     cellularNetworkUpdated()
@@ -418,6 +438,9 @@ class MainActivity : ComponentActivity() {
             override fun onLost(network: Network) {
                 super.onLost(network)
                 runOnUiThread {
+                    if (isDestroyed || cellularNetwork != network) {
+                        return@runOnUiThread
+                    }
                     logger.log("Cellular network lost")
                     cellularNetwork = null
                     cellularNetworkUpdated()
@@ -428,7 +451,33 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun createWiFiNetworkRequest(): NetworkCallback {
-        return object : NetworkCallback() {}
+        return object : NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                runOnUiThread {
+                    if (isDestroyed) {
+                        return@runOnUiThread
+                    }
+                    wifiNetwork = network
+                    for (relay in relays) {
+                        relay.setWiFiNetwork(network)
+                    }
+                    updateAutomaticStatus()
+                }
+            }
+
+            override fun onLost(network: Network) {
+                runOnUiThread {
+                    if (isDestroyed || wifiNetwork != network) {
+                        return@runOnUiThread
+                    }
+                    wifiNetwork = null
+                    for (relay in relays) {
+                        relay.setWiFiNetwork(null)
+                    }
+                    updateAutomaticStatus()
+                }
+            }
+        }
     }
 
     private fun createEthernetNetworkRequest(): NetworkCallback {
