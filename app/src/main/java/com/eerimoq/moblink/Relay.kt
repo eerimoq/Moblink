@@ -9,6 +9,7 @@ import androidx.compose.runtime.mutableStateOf
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.Proxy
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
@@ -164,6 +165,7 @@ class Relay {
                 .newBuilder()
                 .socketFactory(network.socketFactory)
                 .dns { network.getAllByName(it).toList() }
+                .proxy(Proxy.NO_PROXY)
                 .build()
         webSocket =
             client.newWebSocket(
@@ -329,7 +331,7 @@ class Relay {
         startStreamerReceiver(
             streamerSocket!!,
             destinationSocket!!,
-            InetAddress.getByName(startTunnel.address),
+            destinationNetwork!!.getAllByName(startTunnel.address).first(),
             startTunnel.port,
             this,
             streamerUrl,
