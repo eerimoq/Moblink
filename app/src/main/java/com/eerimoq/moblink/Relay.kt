@@ -1,5 +1,6 @@
 package com.eerimoq.moblink
 
+import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Handler
 import android.os.HandlerThread
@@ -21,6 +22,9 @@ import okio.ByteString.Companion.encodeUtf8
 class Relay {
     private val okHttpClient = OkHttpClient.Builder().pingInterval(5, TimeUnit.SECONDS).build()
     private var webSocket: WebSocket? = null
+    private var connectivityManager: ConnectivityManager? = null
+    private var streamerNetworks: List<Network> = emptyList()
+    private var streamerNetwork: Network? = null
     private var destinationNetwork: Network? = null
     private var streamerSocket: DatagramSocket? = null
     private var destinationSocket: DatagramSocket? = null
@@ -43,6 +47,7 @@ class Relay {
     var uiStreamerUrl = ""
 
     fun setup(
+        connectivityManager: ConnectivityManager,
         relayId: String,
         streamerUrl: String,
         password: String,
@@ -51,6 +56,7 @@ class Relay {
         getStatus: ((Int, ThermalState?) -> Unit) -> Unit,
     ) {
         logger.log("$streamerUrl: Setup")
+        this.connectivityManager = connectivityManager
         this.onStatusUpdated = onStatusUpdated
         this.getStatus = getStatus
         handlerThread.start()
@@ -98,6 +104,16 @@ class Relay {
         }
     }
 
+    fun setStreamerNetworks(networks: List<Network>) {
+        handler?.post {
+            streamerNetworks = networks
+            if (started && streamerNetwork !in networks) {
+                reconnectSoon("Streamer network changed")
+            }
+            updateStatusInternal()
+        }
+    }
+
     fun setDestinationNetwork(network: Network?) {
         handler?.post {
             destinationNetwork = network
@@ -141,8 +157,16 @@ class Relay {
                 logger.log("$streamerUrl: Failed to build URL: $e")
                 return
             }
+        streamerNetwork = pickStreamerNetwork(request.url.host)
+        val network = streamerNetwork ?: return
+        val client =
+            okHttpClient
+                .newBuilder()
+                .socketFactory(network.socketFactory)
+                .dns { network.getAllByName(it).toList() }
+                .build()
         webSocket =
-            okHttpClient.newWebSocket(
+            client.newWebSocket(
                 request,
                 object : WebSocketListener() {
                     override fun onMessage(webSocket: WebSocket, text: String) {
@@ -183,6 +207,7 @@ class Relay {
         logger.log("$streamerUrl: Stop internal")
         webSocket?.cancel()
         webSocket = null
+        streamerNetwork = null
         connected = false
         wrongPassword = false
         updateStatusInternal()
@@ -198,6 +223,8 @@ class Relay {
                 "Streamer URL empty"
             } else if (password.isEmpty()) {
                 "Password empty"
+            } else if (streamerNetworks.isEmpty()) {
+                "Waiting for WiFi or Ethernet"
             } else if (destinationNetwork == null) {
                 "Waiting for cellular"
             } else if (connected) {
@@ -228,6 +255,20 @@ class Relay {
 
     private fun getWebsocket(): WebSocket? {
         return webSocket
+    }
+
+    private fun pickStreamerNetwork(host: String): Network? {
+        return streamerNetworks.firstOrNull { network ->
+            val routes =
+                connectivityManager?.getLinkProperties(network)?.routes ?: return@firstOrNull false
+            try {
+                network.getAllByName(host).any { address ->
+                    routes.any { !it.isDefaultRoute && it.matches(address) }
+                }
+            } catch (_: Exception) {
+                false
+            }
+        } ?: streamerNetworks.firstOrNull()
     }
 
     private fun handleMessage(text: String) {
@@ -276,11 +317,12 @@ class Relay {
         streamerSocket = null
         destinationSocket?.close()
         destinationSocket = null
-        if (destinationNetwork == null) {
-            reconnectSoon("Start tunnel without destination network")
+        if (streamerNetwork == null || destinationNetwork == null) {
+            reconnectSoon("Start tunnel without streamer or destination network")
             return
         }
         streamerSocket = DatagramSocket()
+        streamerNetwork?.bindSocket(streamerSocket)
         destinationSocket = DatagramSocket()
         destinationSocket?.soTimeout = 30 * 1000
         destinationNetwork?.bindSocket(destinationSocket)

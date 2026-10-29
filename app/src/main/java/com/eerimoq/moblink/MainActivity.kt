@@ -81,7 +81,7 @@ class MainActivity : ComponentActivity() {
     private var automaticButtonText = mutableStateOf("Start")
     private var automaticStatus = mutableStateOf("Not started")
     private var cellularNetwork: Network? = null
-    private var ethernetNetwork: Network? = null
+    private val streamerNetworks = mutableSetOf<Network>()
     private var showingNotificationsNotAllowedDialog = mutableStateOf(false)
     private var requestPermissionCompletion: ((isGranted: Boolean) -> Unit)? = null
     private val requestPermissionLauncher =
@@ -111,9 +111,23 @@ class MainActivity : ComponentActivity() {
             val packageInfo = packageManager.getPackageInfo(packageName, 0)
             version = packageInfo.versionName ?: "?"
         } catch (_: Exception) {}
-        requestNetwork(NetworkCapabilities.TRANSPORT_CELLULAR, createCellularNetworkRequest())
-        requestNetwork(NetworkCapabilities.TRANSPORT_WIFI, createWiFiNetworkRequest())
-        requestNetwork(NetworkCapabilities.TRANSPORT_ETHERNET, createEthernetNetworkRequest())
+        requestNetwork(
+            NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build(),
+            createCellularNetworkCallback(),
+        )
+        requestNetwork(
+            NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(),
+            createStreamerNetworkCallback(),
+        )
+        requestNetwork(
+            NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+                .build(),
+            createStreamerNetworkCallback(),
+        )
         logger.log("Version: $version")
         logger.log("Relay id: ${settings!!.database.relayId}")
     }
@@ -173,7 +187,7 @@ class MainActivity : ComponentActivity() {
                     stopAutomatic()
                     showingNotificationsNotAllowedDialog.value = true
                 }
-            }
+            },
         )
     }
 
@@ -212,6 +226,7 @@ class MainActivity : ComponentActivity() {
         val database = settings!!.database
         val relay = Relay()
         relay.setup(
+            connectivityManager(),
             database.relayId,
             streamerUrl,
             database.automaticPassword!!,
@@ -229,8 +244,9 @@ class MainActivity : ComponentActivity() {
         )
         relay.uiStreamerName = streamerName
         relay.uiStreamerUrl = streamerUrl
-        relay.start()
+        relay.setStreamerNetworks(streamerNetworks.toList())
         relay.setDestinationNetwork(cellularNetwork)
+        relay.start()
         relays.add(relay)
         updateAutomaticStatus()
     }
@@ -247,6 +263,8 @@ class MainActivity : ComponentActivity() {
         automaticStatus.value =
             if (!automaticStarted) {
                 "Not started"
+            } else if (streamerNetworks.isEmpty()) {
+                "Waiting for WiFi or Ethernet"
             } else if (cellularNetwork == null) {
                 "Waiting for cellular"
             } else if (totalCount > 0) {
@@ -263,6 +281,7 @@ class MainActivity : ComponentActivity() {
         for (relaySettings in database.relays) {
             val relay = Relay()
             relay.setup(
+                connectivityManager(),
                 database.relayId,
                 relaySettings.streamerUrl,
                 relaySettings.password,
@@ -270,6 +289,7 @@ class MainActivity : ComponentActivity() {
                 { status -> runOnUiThread { relay.uiStatus.value = status } },
                 { callback -> runOnUiThread { getStatus(callback) } },
             )
+            relay.setStreamerNetworks(streamerNetworks.toList())
             relay.setDestinationNetwork(cellularNetwork)
             relays.add(relay)
         }
@@ -296,7 +316,7 @@ class MainActivity : ComponentActivity() {
                     stopRelayManual(relay)
                     showingNotificationsNotAllowedDialog.value = true
                 }
-            }
+            },
         )
     }
 
@@ -333,10 +353,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun ethernetNetworkUpdated() {
-        // for (relay in relays) {
-        //    relay.setDestinationNetwork(ethernetNetwork)
-        // }
+    private fun streamerNetworksUpdated() {
+        for (relay in relays) {
+            relay.setStreamerNetworks(streamerNetworks.toList())
+        }
     }
 
     private fun saveSettings() {
@@ -392,18 +412,15 @@ class MainActivity : ComponentActivity() {
         return null
     }
 
-    private fun requestNetwork(transportType: Int, networkCallback: NetworkCallback) {
-        val networkRequest =
-            NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .addTransportType(transportType)
-                .build()
-        val connectivityManager =
-            getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        connectivityManager.requestNetwork(networkRequest, networkCallback)
+    private fun connectivityManager(): ConnectivityManager {
+        return getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     }
 
-    private fun createCellularNetworkRequest(): NetworkCallback {
+    private fun requestNetwork(networkRequest: NetworkRequest, networkCallback: NetworkCallback) {
+        connectivityManager().requestNetwork(networkRequest, networkCallback)
+    }
+
+    private fun createCellularNetworkCallback(): NetworkCallback {
         return object : NetworkCallback() {
             override fun onAvailable(network: Network) {
                 super.onAvailable(network)
@@ -427,17 +444,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun createWiFiNetworkRequest(): NetworkCallback {
-        return object : NetworkCallback() {}
-    }
-
-    private fun createEthernetNetworkRequest(): NetworkCallback {
+    private fun createStreamerNetworkCallback(): NetworkCallback {
         return object : NetworkCallback() {
             override fun onAvailable(network: Network) {
                 super.onAvailable(network)
                 runOnUiThread {
-                    ethernetNetwork = network
-                    ethernetNetworkUpdated()
+                    logger.log("Streamer network available")
+                    streamerNetworks.add(network)
+                    streamerNetworksUpdated()
                     updateAutomaticStatus()
                 }
             }
@@ -445,8 +459,9 @@ class MainActivity : ComponentActivity() {
             override fun onLost(network: Network) {
                 super.onLost(network)
                 runOnUiThread {
-                    ethernetNetwork = null
-                    ethernetNetworkUpdated()
+                    logger.log("Streamer network lost")
+                    streamerNetworks.remove(network)
+                    streamerNetworksUpdated()
                     updateAutomaticStatus()
                 }
             }
@@ -464,7 +479,7 @@ class MainActivity : ComponentActivity() {
                 title = { Text("Notifications not allowed") },
                 text = {
                     Text(
-                        "Notifications are needed for Moblink to run in background. Please allow them in Android settings."
+                        "Notifications are needed for Moblink to run in background. Please allow them in Android settings.",
                     )
                 },
             )
@@ -482,11 +497,11 @@ class MainActivity : ComponentActivity() {
                         LinkAnnotation.Url(
                             "https://apps.apple.com/app/id6466745933",
                             TextLinkStyles(style = SpanStyle(color = Color.Blue)),
-                        )
+                        ),
                     ) {
                         append("Moblin")
                     }
-                }
+                },
             )
             AppIcon()
             NameField()
@@ -609,7 +624,7 @@ class MainActivity : ComponentActivity() {
                     else MaterialTheme.colorScheme.inversePrimary
                 Box(
                     modifier =
-                        Modifier.padding(2.dp).clip(CircleShape).background(color).size(10.dp)
+                        Modifier.padding(2.dp).clip(CircleShape).background(color).size(10.dp),
                 )
             }
         }
