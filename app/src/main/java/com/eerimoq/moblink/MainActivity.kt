@@ -81,6 +81,7 @@ class MainActivity : ComponentActivity() {
     private var automaticButtonText = mutableStateOf("Start")
     private var automaticStatus = mutableStateOf("Not started")
     private var cellularNetwork: Network? = null
+    private var wiFiNetwork: Network? = null
     private var ethernetNetwork: Network? = null
     private var showingNotificationsNotAllowedDialog = mutableStateOf(false)
     private var requestPermissionCompletion: ((isGranted: Boolean) -> Unit)? = null
@@ -111,9 +112,18 @@ class MainActivity : ComponentActivity() {
             val packageInfo = packageManager.getPackageInfo(packageName, 0)
             version = packageInfo.versionName
         } catch (_: Exception) {}
-        requestNetwork(NetworkCapabilities.TRANSPORT_CELLULAR, createCellularNetworkRequest())
-        requestNetwork(NetworkCapabilities.TRANSPORT_WIFI, createWiFiNetworkRequest())
-        requestNetwork(NetworkCapabilities.TRANSPORT_ETHERNET, createEthernetNetworkRequest())
+        requestNetwork(
+            NetworkCapabilities.TRANSPORT_CELLULAR,
+            true,
+            createCellularNetworkRequest(),
+        )
+        // The streamer is typically on a local network without internet access.
+        requestNetwork(NetworkCapabilities.TRANSPORT_WIFI, false, createWiFiNetworkRequest())
+        requestNetwork(
+            NetworkCapabilities.TRANSPORT_ETHERNET,
+            false,
+            createEthernetNetworkRequest(),
+        )
         logger.log("Version: $version")
         logger.log("Relay id: ${settings!!.database.relayId}")
     }
@@ -210,7 +220,7 @@ class MainActivity : ComponentActivity() {
             relays.remove(existingRelay)
         }
         val database = settings!!.database
-        val relay = Relay()
+        val relay = Relay(getConnectivityManager())
         relay.setup(
             database.relayId,
             streamerUrl,
@@ -231,6 +241,7 @@ class MainActivity : ComponentActivity() {
         relay.uiStreamerUrl = streamerUrl
         relay.start()
         relay.setDestinationNetwork(cellularNetwork)
+        relay.setStreamerNetworks(getStreamerNetworks())
         relays.add(relay)
         updateAutomaticStatus()
     }
@@ -249,6 +260,8 @@ class MainActivity : ComponentActivity() {
                 "Not started"
             } else if (cellularNetwork == null) {
                 "Waiting for cellular"
+            } else if (getStreamerNetworks().isEmpty()) {
+                "Waiting for WiFi or Ethernet"
             } else if (totalCount > 0) {
                 "Connected to $connectedCount of $totalCount streamers"
             } else {
@@ -261,7 +274,7 @@ class MainActivity : ComponentActivity() {
         logger.log("Setup manual")
         val database = settings!!.database
         for (relaySettings in database.relays) {
-            val relay = Relay()
+            val relay = Relay(getConnectivityManager())
             relay.setup(
                 database.relayId,
                 relaySettings.streamerUrl,
@@ -271,6 +284,7 @@ class MainActivity : ComponentActivity() {
                 { callback -> runOnUiThread { getStatus(callback) } },
             )
             relay.setDestinationNetwork(cellularNetwork)
+            relay.setStreamerNetworks(getStreamerNetworks())
             relays.add(relay)
         }
     }
@@ -333,10 +347,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun ethernetNetworkUpdated() {
-        // for (relay in relays) {
-        //    relay.setDestinationNetwork(ethernetNetwork)
-        // }
+    private fun getStreamerNetworks(): List<Network> {
+        return listOfNotNull(ethernetNetwork, wiFiNetwork)
+    }
+
+    private fun streamerNetworksUpdated() {
+        val networks = getStreamerNetworks()
+        for (relay in relays) {
+            relay.setStreamerNetworks(networks)
+        }
     }
 
     private fun saveSettings() {
@@ -392,15 +411,22 @@ class MainActivity : ComponentActivity() {
         return null
     }
 
-    private fun requestNetwork(transportType: Int, networkCallback: NetworkCallback) {
-        val networkRequest =
-            NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .addTransportType(transportType)
-                .build()
-        val connectivityManager =
-            getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        connectivityManager.requestNetwork(networkRequest, networkCallback)
+    private fun getConnectivityManager(): ConnectivityManager {
+        return getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    }
+
+    private fun requestNetwork(
+        transportType: Int,
+        internet: Boolean,
+        networkCallback: NetworkCallback,
+    ) {
+        val builder = NetworkRequest.Builder().addTransportType(transportType)
+        if (internet) {
+            builder.addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        } else {
+            builder.removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        }
+        getConnectivityManager().requestNetwork(builder.build(), networkCallback)
     }
 
     private fun createCellularNetworkRequest(): NetworkCallback {
@@ -428,16 +454,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun createWiFiNetworkRequest(): NetworkCallback {
-        return object : NetworkCallback() {}
-    }
-
-    private fun createEthernetNetworkRequest(): NetworkCallback {
         return object : NetworkCallback() {
             override fun onAvailable(network: Network) {
                 super.onAvailable(network)
                 runOnUiThread {
-                    ethernetNetwork = network
-                    ethernetNetworkUpdated()
+                    logger.log("WiFi network available")
+                    wiFiNetwork = network
+                    streamerNetworksUpdated()
                     updateAutomaticStatus()
                 }
             }
@@ -445,8 +468,39 @@ class MainActivity : ComponentActivity() {
             override fun onLost(network: Network) {
                 super.onLost(network)
                 runOnUiThread {
+                    if (network != wiFiNetwork) {
+                        return@runOnUiThread
+                    }
+                    logger.log("WiFi network lost")
+                    wiFiNetwork = null
+                    streamerNetworksUpdated()
+                    updateAutomaticStatus()
+                }
+            }
+        }
+    }
+
+    private fun createEthernetNetworkRequest(): NetworkCallback {
+        return object : NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                super.onAvailable(network)
+                runOnUiThread {
+                    logger.log("Ethernet network available")
+                    ethernetNetwork = network
+                    streamerNetworksUpdated()
+                    updateAutomaticStatus()
+                }
+            }
+
+            override fun onLost(network: Network) {
+                super.onLost(network)
+                runOnUiThread {
+                    if (network != ethernetNetwork) {
+                        return@runOnUiThread
+                    }
+                    logger.log("Ethernet network lost")
                     ethernetNetwork = null
-                    ethernetNetworkUpdated()
+                    streamerNetworksUpdated()
                     updateAutomaticStatus()
                 }
             }
